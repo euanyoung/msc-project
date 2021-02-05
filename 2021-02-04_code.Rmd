@@ -1,0 +1,762 @@
+---
+title: "2021-02-04_code"
+author: "Euan Young"
+date: "04/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import data and subsetting
+
+Packages needed
+```{r datat_packages}
+
+library(tidyverse) #for data subsetting
+
+#for reading in and joining phylogenetic trees
+library(ape)
+library(phytools) 
+library(geiger)
+
+library(MCMCglmm) #for models
+
+library(ggplot) #for figures
+
+```
+
+Importing the data and creating two data-subsets: one for evolvability and one for h2
+
+```{r datat_import}
+data <- read.csv("/Users/euanay03/Desktop/msc-project/data/2021-02-04_data.csv")
+
+cva_data <- data %>%
+  filter(!CVA=="") %>%
+  filter(!SE.CVA=="") %>%
+  filter(!species.latin=="NA") %>%
+  drop_na(n)
+
+h2_data <- data %>%
+  filter(!h2=="") %>%
+  filter(!SE.h2=="") %>%
+  filter(!species.latin=="NA") %>%
+  filter(!species.latin=="") %>%
+  drop_na(n)
+
+```
+
+## Importing phylogenetic trees and joining
+
+To test for a phylogenetic signal in cva and h2 accross both birds and mammals, we initially built robust maximum clade credibility trees for both birds and mammals using TreeAnnotator available on BEAST v.1.10.4 (Drummond and Rambaut, 2007). This was based on 1,000 randomly sampled trees from a pseudo-posterior distribution of species-level phylogenies (available at: https://vertlife.org/phylosubsets/). These “supertrees” were subset for the species used and are based on: Jetz et al. (2012) using the Hackett et al. (2008) backbone for birds; and Upham et al., (2019) for mammals. 
+
+Now we need to import these trees to R and import them using the packages phytools (CITE), geiger (CITE) and ape v.5 (Paradis and Schliep, 2018). We will then join/stitch them using the package geiger at a point rooted at 315 million years, according to the dating of Archerpeton anthracos and the origin of all amniotes (as directed by Healy et al., 2014).
+
+This resulting phylogeny contains 68 different species and will be used in the models.
+
+```{r phylogenetic_trees}
+
+# Importing bird and mammal concensus trees
+# Code helped by grafting trees tutorial by Cecina Babich Morrow (https://babichmorrowc.github.io/post/2019-01-09-grafting-trees/)
+
+# Bird tree
+bird_tree <-phytools::read.newick("/Users/euanay03/Desktop/msc-project/data/trees/bird_1000_con.nwk")
+
+# mammal tree
+mammal_tree <-phytools::read.newick("/Users/euanay03/Desktop/Masters/trees/mammal_1000_con.nwk")
+
+# Make tree in which to graft these two trees onto for joining
+tip.labels <- c("birds", "mamm")
+
+## Make a tree with just orders:
+edge <- matrix(c(3,2,
+                 3,1), byrow=TRUE, ncol=2)
+
+edge.length <- c(315,315) #Date of origin of all amniotes and joining point of birds and mammals
+# 315 million years, according to the dating of Archerpeton anthracos (as directed by Healy et al., 2014)
+
+Nnode <- 1
+ordertree <- list(edge=edge, Nnode=Nnode, tip.label=tip.labels, edge.length=edge.length)
+class(ordertree) <- 'phylo'
+
+tree_list <- list(birds=bird_tree, mamm=mammal_tree)
+class(tree_list) <- "multiPhylo"
+
+#Add taxonomic information to tree
+otax <- data.frame("Class"= ordertree$tip.label, "Superclass"=c(rep("Tetrapoda",2)))
+rownames(otax) <- ordertree$tip.label
+
+classtree <- nodelabel.phylo(ordertree, otax, ncores=1) 
+
+bird_mammal_tree <- glomogram.phylo(classtree, tree_list)
+
+# Tree must also be ultrametric for analysis
+# Tree
+bird_mammal_tree <- force.ultrametric(bird_mammal_tree, method=c("nnls"))
+```
+
+### Subsetting phylogenies for each dataset
+
+Now I just need to subset the phylogenies for the species available in the cva and h2 datasets
+
+```{r Subsetting phylogenies for each datasubset}
+
+# First dataset must contain 'animal' column for matching species names for phylogeny for MCMCglmm analysis
+cva_data <- cva_data %>%
+  rename(animal = species.latin)
+
+h2_data <- h2_data %>%
+  rename(animal = species.latin)
+
+# subset phylogeny for species with cva estimates available
+tip.keep <- sort(unique(cva_data$animal)) 
+cva_tree <- keep.tip(bird_mammal_tree, tip.keep)
+
+# subset phylogeny for species with h2 estimates available
+tip.keep <- sort(unique(h2_data$animal)) 
+h2_tree <- keep.tip(bird_mammal_tree, tip.keep)
+
+
+```
+
+
+
+## MCMCglmm models
+
+```{r mcmglmm_models}
+
+cva_data <- cva_data %>%
+  select(-trait)
+
+# prior
+a <- 1000
+prior3 <- list(R = list(V = diag(1), nu = 0.002),
+               G = list(G1 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a),
+                        G2 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a),
+                        G3 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a)))
+
+SE.mev <- (cva_data$SE.CVA)^2
+
+m1.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = cva_tree, mev=SE.mev, data=cva_data, pr=TRUE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
+
+h2_data <- h2_data %>%
+  select(-trait)
+
+h2_data<- as.data.frame(h2_data)
+
+# prior
+a <- 1000
+prior3 <- list(R = list(V = diag(1), nu = 0.002),
+               G = list(G1 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a),
+                        G2 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a),
+                        G3 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a)))
+
+SE.mev <- (h2_data$SE.h2)^2
+
+m1.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = bird_mammal_tree, mev=SE.mev, data=h2_data, pr=TRUE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
+
+
+# prior
+a <- 1000
+prior2 <- list(R = list(V = diag(1), nu = 0.002),
+               G = list(G1 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a),
+                        G2 = list(V = diag(1), nu = 1, alpha.mu = 0, alpha.V = diag(1)*a)))
+
+SE.mev <- (cva_data$SE.CVA)^2
+
+m2.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=cva_data, pr=TRUE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
+
+
+h2_data<- as.data.frame(h2_data)
+
+SE.mev <- (h2_data$SE.h2)^2
+
+m2.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=h2_data, pr=TRUE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
+
+
+```
+
+## Results
+
+Here, I am using some functions to extract the results I am interested in from the MCMCglmm models
+
+```{r results}
+summary(m1.cva)
+# This function is used to calculate the percentage variation explained by each random effect - MCMCglmmm only gives you the raw variation estimates
+ran.perc <- function(x) { #x is the MCMCglmm model
+  smpl <- x$VCV #extract the ~1000 estimates
+  smpl <- data.frame(smpl)
+  n <- ncol(smpl)-1
+  smpl <- smpl[,-n] # we must remove the 'mev' effect
+  tot.var <- rowSums(smpl) #total variance
+  per.var <- as.data.frame((smpl/tot.var)*100) # convert to percentage
+  per.var <- as.mcmc(per.var) #percentage estimates then have to be saved back as a mcmc object to use the posterior mode oe HPD interval functions
+  mode <- posterior.mode(per.var) 
+  lci <- c(HPDinterval(per.var[,1])[1],HPDinterval(per.var[,2])[1],HPDinterval(per.var[,3])[1],HPDinterval(per.var[,4])[1])
+  uci <- c(HPDinterval(per.var[,1])[2],HPDinterval(per.var[,2])[2],HPDinterval(per.var[,3])[2],HPDinterval(per.var[,4])[2])
+  table <- as.data.frame(cbind(mode,lci,uci))
+  colnames(table) <- c("percentage variance explained", "lower 95% CI", "Upper 95% CI")
+  print(table)
+}
+
+ftable <- function(x) {
+  sols <- summary(x)$solutions[,-1]
+  fixed <- data.frame(row.names(sols), sols, row.names = NULL)  ## convert to dataframes with the row.names as the first col
+  names(fixed)[names(fixed) == "row.names.sols."] <- "variable"  ## change the columns names to variable, so they all match
+  n <- nrow(fixed)
+  modes <- posterior.mode(x$Sol)
+  modes <- data.frame(modes)
+  modes <- modes[1:n,]
+  table <- as.data.frame(cbind(fixed, modes))
+  print(table)
+}
+
+ran.perc(m1.cva)
+ftable(m1.cva)
+
+# raw variances
+posterior.mode(m1.cva$VCV)
+HPDinterval(m1.cva$VCV)
+
+ran.perc(m1.h2)
+ftable(m1.h2)
+
+posterior.mode(m1.h2$VCV)
+HPDinterval(m1.h2$VCV)
+
+
+# Slightly modified function for when the model has only 2 random effects
+ran.perc.2 <- function(x) {
+  smpl <- x$VCV
+  smpl <- data.frame(smpl)
+  n <- ncol(smpl)-1
+  smpl <- smpl[,-n]
+  tot.var <- rowSums(smpl)
+  per.var <- as.data.frame((smpl/tot.var)*100)
+  per.var <- as.mcmc(per.var)
+  mode <- posterior.mode(per.var)
+  lci <- c(HPDinterval(per.var[,1])[1],HPDinterval(per.var[,2])[1],HPDinterval(per.var[,3])[1])
+  uci <- c(HPDinterval(per.var[,1])[2],HPDinterval(per.var[,2])[2],HPDinterval(per.var[,3])[2])
+  table <- as.data.frame(cbind(mode,lci,uci))
+  colnames(table) <- c("percentage variance explained", "lower 95% CI", "Upper 95% CI")
+  print(table)
+}
+
+ran.perc.2(m2.cva)
+ftable(m2.cva)
+
+ran.perc.2(m2.h2)
+ftable(m1.h2)
+```
+
+## Creating figures
+
+Here is the code for creating the figures. Generally it involves extracting the fixed effect and random effect estimates from the MCMCglmm models
+
+#### Figure 1a and b
+
+``` {r figure1}
+I<-m1.h2$Sol[,grep(pattern = "(Intercept)",x = colnames(m1.h2$Sol))]
+N<-m1.h2$Sol[,11]
+Y<-m1.h2$Sol[,grep(pattern = "year",x = colnames(m1.h2$Sol))]
+FT<-m1.h2$Sol[,grep(pattern = "trait.category.fitnesslife-history fitness",x = colnames(m1.h2$Sol))]
+NF<-m1.h2$Sol[,grep(pattern = "trait.category.fitnesslife-history not fitness",x = colnames(m1.h2$Sol))]
+MO<-m1.h2$Sol[,grep(pattern = "trait.category.fitnessmorphology",x = colnames(m1.h2$Sol))]
+PH<-m1.h2$Sol[,grep(pattern = "trait.category.fitnessphysiology",x = colnames(m1.h2$Sol))]
+
+nm <- median(h2_data$n)
+my <- median(h2_data$year)
+
+fitness <- as.mcmc(I+(N*nm)+(Y*my)+FT)
+non.fitness <- as.mcmc(I+(N*nm)+(Y*my)+NF)
+morphology <- as.mcmc(I+(N*nm)+(Y*my)+MO)
+physiology <- as.mcmc(I+(N*nm)+(Y*my)+PH)
+behaviour <- as.mcmc(I+(N*nm)+(Y*my))
+
+posterior.mode(fitness)
+
+variable <- c("Behaviour", "Morphology","Physiology","Life history
+fitness","Life history
+non-fitness")
+modes <- c(as.numeric(posterior.mode(behaviour)), as.numeric(posterior.mode(morphology)),as.numeric(posterior.mode(physiology)),as.numeric(posterior.mode(fitness)),as.numeric(posterior.mode(non.fitness)))
+l.95..CI <- c(as.numeric(HPDinterval(behaviour))[1],as.numeric(HPDinterval(morphology))[1],as.numeric(HPDinterval(physiology))[1],as.numeric(HPDinterval(fitness))[1],as.numeric(HPDinterval(non.fitness))[1])
+u.95..CI <- c(as.numeric(HPDinterval(behaviour))[2],as.numeric(HPDinterval(morphology))[2],as.numeric(HPDinterval(physiology))[2],as.numeric(HPDinterval(fitness))[2],as.numeric(HPDinterval(non.fitness))[2])
+
+variable <- as.character(variable)
+modes <- as.numeric(modes)
+l.95..CI <- as.numeric(l.95..CI)
+u.95..CI <- as.numeric(u.95..CI)
+
+trait.class <- as.data.frame(cbind(modes,l.95..CI, u.95..CI))
+trait.class$variable <- variable
+
+# sample sizes
+n.trait <- h2_data %>%
+  count(trait.category.fitness)
+n.trait$variable <- c("Behaviour","Life history
+fitness","Life history
+non-fitness", "Morphology","Physiology")
+n.trait <- n.trait[,-1]
+
+trait.class <- left_join(n.trait,trait.class, by = "variable", copy=FALSE)
+
+x1a <- ggplot(trait.class, aes(x=variable, y=modes)) + 
+  geom_pointrange(aes(ymin=l.95..CI, ymax=u.95..CI)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_hline(yintercept=0) +
+  xlab("") +
+  ylim(c(0,0.65)) +
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 15, angle = 0, family = "serif")) +
+  theme(legend.position = "none") +
+  theme(axis.title.x =  element_text(colour = "black", size = 15, face="bold")) +
+  theme(title =  element_text(colour = "black", size = 15, face="bold")) +
+  theme(axis.title.y = element_text(colour = "black", size = 15, face = "plain", lineheight = 0.5)) +
+  geom_text(aes(label=n), y= .62,color="black", size=5, angle = 0, family = "serif") +
+  ylab(bquote(''*h^2*'')) +
+  theme(axis.text.y = element_text(angle = 0))
+
+x1a
+
+I<-m1.cva$Sol[,grep(pattern = "(Intercept)",x = colnames(m1.cva$Sol))]
+N<-m1.cva$Sol[,9]
+Y<-m1.cva$Sol[,grep(pattern = "year",x = colnames(m1.cva$Sol))]
+FT<-m1.cva$Sol[,grep(pattern = "trait.category.fitnesslife-history fitness",x = colnames(m1.cva$Sol))]
+NF<-m1.cva$Sol[,grep(pattern = "trait.category.fitnesslife-history not fitness",x = colnames(m1.cva$Sol))]
+MO<-m1.cva$Sol[,grep(pattern = "trait.category.fitnessmorphology",x = colnames(m1.cva$Sol))]
+PH<-m1.cva$Sol[,grep(pattern = "trait.category.fitnessphysiology",x = colnames(m1.cva$Sol))]
+
+nm <- median(cva_data$n)
+my <- median(cva_data$year)
+
+fitness <- as.mcmc(I+(N*nm)+(Y*my)+FT)
+non.fitness <- as.mcmc(I+(N*nm)+(Y*my)+NF)
+morphology <- as.mcmc(I+(N*nm)+(Y*my)+MO)
+physiology <- as.mcmc(I+(N*nm)+(Y*my)+PH)
+behaviour <- as.mcmc(I+(N*nm)+(Y*my))
+
+variable <- c("Behaviour", "Morphology","Physiology","Life history
+fitness","Life history
+non-fitness")
+modes <- c(as.numeric(posterior.mode(behaviour)), as.numeric(posterior.mode(morphology)),as.numeric(posterior.mode(physiology)),as.numeric(posterior.mode(fitness)),as.numeric(posterior.mode(non.fitness)))
+l.95..CI <- c(as.numeric(HPDinterval(behaviour))[1],as.numeric(HPDinterval(morphology))[1],as.numeric(HPDinterval(physiology))[1],as.numeric(HPDinterval(fitness))[1],as.numeric(HPDinterval(non.fitness))[1])
+u.95..CI <- c(as.numeric(HPDinterval(behaviour))[2],as.numeric(HPDinterval(morphology))[2],as.numeric(HPDinterval(physiology))[2],as.numeric(HPDinterval(fitness))[2],as.numeric(HPDinterval(non.fitness))[2])
+
+variable <- as.character(variable)
+modes <- as.numeric(modes)
+l.95..CI <- as.numeric(l.95..CI)
+u.95..CI <- as.numeric(u.95..CI)
+
+trait.class <- as.data.frame(cbind(modes,l.95..CI, u.95..CI))
+trait.class$variable <- variable
+
+# sample sizes
+n.trait <- cva_data %>%
+  count(trait.category.fitness)
+
+n.trait$variable <- c("Behaviour","Life history
+fitness","Life history
+non-fitness", "Morphology","Physiology")
+n.trait <- n.trait[,-1]
+
+trait.class <- left_join(n.trait,trait.class, by = "variable", copy=FALSE)
+
+
+x1b <- ggplot(trait.class, aes(x=variable, y=modes)) + 
+  geom_pointrange(aes(ymin=l.95..CI, ymax=u.95..CI)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_hline(yintercept=0) +
+  xlab("") +
+  ylim(c(-10.5,45)) +
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 15, angle = 0, family = "serif")) +
+  theme(legend.position = "none") +
+  theme(axis.title.x =  element_text(colour = "black", size = 15, face="bold")) +
+  theme(title =  element_text(colour = "black", size = 15, face="bold")) +
+  geom_text(aes(label=n), y= 42,color="black", size=5, angle = 0, family = "serif") +
+    ylab(bquote(''*CV[A]*''))  +
+  theme(axis.title.y = element_text(colour = "black", size = 15, face = "plain", lineheight = 0.5,  angle = 90))
+x1b
+
+library(ggpubr)
+
+x1 <- ggarrange(x1b,x1a,
+                labels = c("a", "b"),
+                ncol = 2, nrow = 1)
+
+annotate_figure(x1,
+                bottom = text_grob("          Trait class", color = "black", size = 15)
+)
+
+```
+
+#### Figures 2a and b
+
+``` {r figure2}
+
+ran.est <- function(x) {
+  Gmodes <- x$VCV
+  Gmodes <- data.frame(Gmodes)
+  n <- ncol(Gmodes)-1
+  Gmodes <- Gmodes[,-n]
+  tot.var <- rowSums(Gmodes)
+  tot.var <- as.data.frame((Gmodes/tot.var)*100)
+}
+
+df <- ran.est(m1.h2)
+
+df <- df %>%
+  gather()
+
+df$key <- as.factor(df$key)
+
+df$key <- as.factor(gsub("study.ID", "Study ID", df$key))
+df$key <- as.factor(gsub("species.english", "Species", df$key))
+df$key <- as.factor(gsub("animal", "Phylogeny", df$key))
+df$key <- as.factor(gsub("units", "Residual", df$key))
+
+x2a <- ggplot(df,aes(x = value, fill = fct_rev(key))) +
+  geom_density(alpha=0.6) +
+  labs(fill="Random 
+effect") +
+  xlab("") +
+  ylab("") +
+  xlim(c(0,100)) +
+  ggtitle(bquote(''*h^2*'')) +
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 16, angle = 0, family = "serif")) +
+  theme(legend.position = "none") +
+  theme(legend.text = element_text(colour = "black", size = 16, angle = 0, family = "serif")) +
+  theme(axis.title.x =  element_text(colour = "black", size = 16, face="plain")) +
+  theme(title =  element_text(colour = "black", size = 14, face="plain")) +
+  theme(axis.title.y = element_text(colour = "black", size = 16, face="plain", lineheight = 0.5))+
+  scale_fill_manual(values = c("lemonchiffon","dodgerblue3","grey","red"))+
+  theme(plot.title = element_text(hjust=.5))
+
+x2a
+
+ran.est <- function(x) {
+  Gmodes <- x$VCV
+  Gmodes <- data.frame(Gmodes)
+  n <- ncol(Gmodes)-1
+  Gmodes <- Gmodes[,-n]
+  tot.var <- rowSums(Gmodes)
+  tot.var <- as.data.frame((Gmodes/tot.var)*100)
+}
+
+df <- ran.est(m1.cva)
+
+df <- df %>%
+  gather()
+
+df$key <- as.factor(df$key)
+
+df$key <- as.factor(gsub("study.ID", "Study ID", df$key))
+df$key <- as.factor(gsub("species.english", "Species", df$key))
+df$key <- as.factor(gsub("animal", "Phylogeny", df$key))
+df$key <- as.factor(gsub("units", "Residual", df$key))
+
+x2b <- ggplot(df,aes(x = value, fill = fct_rev(key))) +
+  geom_density(alpha=0.6) +
+  labs(fill="Random 
+effect") +
+  xlab("") +
+  ylab("") +
+  xlim(c(0,100)) +
+  ggtitle(bquote(''*CV[A]*'')) +
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 16, angle = 0, family = "serif")) +
+  theme(legend.position = "none") +
+  theme(legend.text = element_text(colour = "black", size = 16, angle = 0, family = "serif")) +
+  theme(axis.title.x =  element_text(colour = "black", size = 16, face="plain")) +
+  theme(title =  element_text(colour = "black", size = 14, face="plain")) +
+  theme(axis.title.y = element_text(colour = "black", size = 16, face="plain", lineheight = 0.5))+
+  scale_fill_manual(values = c("lemonchiffon","dodgerblue3","grey","red"))+
+  theme(plot.title = element_text(hjust=.5))
+
+x2b
+
+fig2 <- ggarrange(x2b, x2a,
+                  labels = c("a ", "b"),
+                  ncol = 2, nrow = 1,align = "v", common.legend = TRUE, legend = "right")
+
+annotate_figure(fig2,
+                left = text_grob("Probability density", color = "black", rot = 90, size = 16,vjust=1),
+                bottom = text_grob("Percentage variance explained by effect", color = "black", size = 16,vjust=-1)
+)
+
+```
+
+``` {r figure3}
+#### Figure 3 Species #####
+
+I<-m1.h2$Sol[,grep(pattern = "(Intercept)",x = colnames(m1.h2$Sol))]
+N<-m1.h2$Sol[,11]
+Y<-m1.h2$Sol[,grep(pattern = "year",x = colnames(m1.h2$Sol))]
+FT<-m1.h2$Sol[,grep(pattern = "trait.category.fitnesslife-history fitness",x = colnames(m1.h2$Sol))]
+NF<-m1.h2$Sol[,grep(pattern = "trait.category.fitnesslife-history not fitness",x = colnames(m1.h2$Sol))]
+MO<-m1.h2$Sol[,grep(pattern = "trait.category.fitnessmorphology",x = colnames(m1.h2$Sol))]
+PH<-m1.h2$Sol[,grep(pattern = "trait.category.fitnessphysiology",x = colnames(m1.h2$Sol))]
+
+
+BV<-m1.h2$Sol[,grep(pattern = "species.english*",x = colnames(m1.h2$Sol))]
+namesBV<- substr(dimnames(BV)[[2]],start = 17,
+                 stop = nchar(dimnames(BV)[[2]]))
+BV<-BV[,which(namesBV %in% h2_data$species.english)]
+
+speciesID<-substr(x = colnames(BV),start = 17,
+                  stop=nchar(colnames(BV)))
+
+pmBV<-data.frame(BV)
+
+names(pmBV) <- speciesID
+
+nm <- median(h2_data$n)
+my <- median(h2_data$year)
+
+species.h2 <- as.mcmc(pmBV+I+(N*nm)+(Y*my)+MO)
+posterior.mode(species.h2)
+pmBV<-data.frame(speciesID,posterior.mode(species.h2),HPDinterval(species.h2))
+names(pmBV)<-c("species.english","mode.BV","lower.CI", "upper.CI")
+
+species_data <- h2_data %>%
+  select(species.english, taxonomic.class) %>%
+  distinct()
+
+pmBV <- left_join(pmBV, species_data, by = "species.english", copy=FALSE)
+
+n.spe <- h2_data %>%
+  select(species.english) %>%
+  count(species.english)
+
+pmBV <- left_join(pmBV, n.spe, by = "species.english", copy=FALSE)
+
+pmBV <- pmBV %>%
+  arrange(mode.BV)
+
+latin.names <- h2_data %>%
+  select(species.english) %>%
+  distinct() %>%
+  arrange(species.english)
+
+pmBV$species.english <- as.factor(gsub("alpine swift","Alpine swift	(*Tachymarptis melba*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("American red squirrel","American red squirrel	(*Tamiasciurus hudsonicus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Australian magpie","Australian magpie	(*Gymnorhina tibicen*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("barn owl","Barn owl	(*Tyto alba*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("barn swallow","Barn swallow	(*Hirundo rustica*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("barnacle goose","Barnacle goose	(*Branta leucopsis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("bighorn sheep","Bighorn sheep	(*Ovis canadensis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("blue tit","Blue tit	(*Parus caeruleus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("blue-footed booby","Blue-footed booby	(*Sula nebouxii*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("brown bear","Brown bear	(*Ursus arctos*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("burrowing owl","Burrowing owl	(*Athene cunicularia*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Capricorn silvereye","Capricorn silvereye	(*Zosterops lateralis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("collared flycatcher","Collared flycatcher	(*Ficedula albicollis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Columbian ground squirrel","Columbian ground squirrel	(*Urocitellus columbianus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("common cactus finch","Common cactus finch	(*Geospiza scandens*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("common gull","Common gull	(*Larus canus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("common pigeon","Common pigeon	(*Columba livia*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("common starling","Common starling	(*Sturnus vulgaris*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("common tern","Common tern	(*Sterna hirundo*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("dark-eyed junco","Dark-eyed junco	(*Junco hyemalis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Darwin's medium ground finch","Darwin's medium ground finch	(*Geospiza fortis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("eastern chipmunks","Eastern chipmunks	(*Tamias striatus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Eastern Kingbirds","Eastern kingbirds	(*Tyrannus tyrannus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("European bee eater","European bee-eater	(*Merops apiaster*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("European storm petral","European storm petral	(*Hydrobates pelagicus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("great reed warbler","Great reed warbler	(*Acrocephalus arundinaceus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("great tit","Great tit	(*Parus major*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("grey wolf","Grey wolf	(*Canis lupus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("house finch","House finch	(*Carpodacus mexicanus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("house sparrow","House sparrow	(*Passer domesticus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("house wren","House wren	(*Troglodytes aedon*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("inaccessible bunting","Inaccessible bunting	(*Nesospiza acunhae*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Island scrub-jay","Island scrub-jay	(*Aphelocoma insularis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("kittiwake","Kittiwake	(*Rissa tridactyla*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("least weasel","Least weasel	(*Mustela nivalis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("lesser snow goose","Lesser snow goose	(*Chen caerulescens*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("long tailed tit","Long-tailed tit	(*Aegithalos caudatus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("megellanic penguins","Megellanic penguins	(*Spheniscus magellanicus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("moose","Moose	(*Alces alces*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("mute swan","Mute swan	(*Cygnus olor*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("parasitic jaeger","Parasitic jaeger	(*Stercorarius parasiticus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("pied flycatcher","Pied flycatcher	(*Ficedula hypoleuca*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("piping plovers","Piping plovers	(*Charadrius melodus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("polar bear","Polar bear	(*Ursus maritimus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("red deer","Red deer	(*Cervus elaphus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("red wolf","Red wolf	(*Canis rufus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("red-billed gull","Red-billed gull	(*Larus novaehollandiae*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("rhesus macaque","Rhesus macaque	(*Macaca mulatta*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("roe deer","Roe deer	(*Capreolus capreolus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("savannah sparrow","Savannah sparrow	(*Passerculus sandwichensis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Seychelles Warbler","Seychelles warbler	(*Acrocephalus sechellensis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Siberian jay","Siberian jay	(*Perisoreus infaustus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("snail kite","Snail kite	(*Rostrhamus sociabilis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("snow petrel","Snow petrel	(*Pagodroma nivea*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("snow vole","Snow vole	(*Chionomys nivalis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Soay sheep","Soay sheep	(*Ovis aries*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("song sparrow","Song sparrow	(*Melospiza melodia*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("spotted hyena","Spotted hyena	(*Crocuta crocuta*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("tibetan ground tit","Tibetan ground tit	(*Pseudopodoces humilis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("toque macaque","Toque macaque	(*Macaca sinica*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("tree swallow","Tree swallow	(*Tachycineta bicolor*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Ural owl","Ural owl	(*Strix uralensis*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Verreaux's sifaka","Verreaux's sifaka	(*Propithecus verreauxi*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("wandering albatross","Wandering albatross	(*Diomedea exulans*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("western bluebird","Western bluebird	(*Sialia mexicana*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("white-throated dipper","White-throated dipper	(*Cinclus cinclus*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("Wilkins's bunting","Wilkins's bunting	(*Nesospiza wilkinsi*)", pmBV$species.english))
+pmBV$species.english <- as.factor(gsub("yellow-bellied marmot","Yellow-bellied marmot	(*Marmota flaviventris*)", pmBV$species.english))
+
+ggplot(pmBV, aes(x=reorder(species.english, mode.BV), color="navy"),y=mode.BV) + 
+  geom_pointrange(aes(y=mode.BV,ymin=lower.CI, ymax=upper.CI)) +
+  geom_hline(yintercept=0) +
+  xlab("") +
+  ylab("heritability estimate") +
+  ggtitle("") +
+  ylim(c(.0,.9)) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 11, angle = 0, family = "serif")) +
+  theme(axis.title.x =  element_text(colour = "black", size = 11, face="plain")) +
+  theme(title =  element_text(colour = "black", size = 10, face="plain")) +
+  theme(axis.title.y = element_text(colour = "black", size = 11, face="plain", lineheight = 0.5))+ 
+  theme(axis.text.x = element_text(angle = 90, size = 10))+
+  scale_color_manual(values = c("navy")) +
+  geom_text(aes(label=n), y= .8,color="black", size=4, angle = 90, family = "serif") +
+  theme(axis.text.x = ggtext::element_markdown()) +  
+  guides(color = guide_legend(label.position = "right", title = "",label.theme = element_text(angle = 90), size =1)) +
+  ylab(bquote(''*h^2*''))
+
+```
+
+## Descriptive stats
+
+``` {r des_stats}
+
+# cva
+nrow(cva_data) #sample size overall
+NROW(unique(cva_data$study.ID)) # sample size studies
+NROW(unique(cva_data$species.latin)) # sample size species
+min(cva_data$year)
+max(cva_data$year) #year range
+
+min(cva_data$n)
+max(cva_data$n) #study sample size (number of phenotypes) range
+
+## weighted mean estimate and variance
+
+# prior
+a <- 1000
+prior1 <- list(R = list(V = diag(1), nu = 0.002))
+
+cva_data <- cva_data %>%
+  select(-trait)
+
+SE.mev <- (cva_data$SE.CVA)^2
+
+m.mean.cva <- MCMCglmm(CVA~1, mev=SE.mev, data=cva_data,prior=prior1, nitt=1005000, thin=1000, burnin=5000)
+
+posterior.mode(m.mean.cva$Sol) # mean
+HPDinterval(m.mean.cva$Sol) # credible intervals
+
+posterior.mode(m.mean.cva$VCV) # raw variance
+HPDinterval(m.mean.cva$VCV) # credible intervals
+
+## Species sample sizes
+
+# Number of birds and mammals
+n.tax<- cva_data %>% 
+  count(species.latin,taxonomic.class)
+
+nrow(n.tax[n.tax$taxonomic.class=="bird",])
+nrow(n.tax[n.tax$taxonomic.class=="mammal",])
+
+species.n <- cva_data %>% 
+  count(species.english) %>% 
+  arrange(n)
+
+species.n %>% top_n(1) #Most species estimates
+species.n %>% top_n(-1) #Fewest species estimates
+
+## h2
+nrow(h2_data) #sample size overall
+NROW(unique(h2_data$study.ID)) # sample size studies
+NROW(unique(h2_data$species.english)) # sample size species
+min(h2_data$year)
+max(h2_data$year) #year range
+
+min(h2_data$n)
+max(h2_data$n) #study sample size (number of phenotypes) range
+
+# weighted mean estimate
+
+# prior
+a <- 1000
+prior1 <- list(R = list(V = diag(1), nu = 0.002))
+
+SE.mev <- (h2_data$SE.h2)^2
+
+m.mean.h2 <- MCMCglmm(h2~1, mev=SE.mev, data=h2_data,prior=prior1, nitt=1005000, thin=1000, burnin=5000)
+
+posterior.mode(m.mean.h2$Sol) # mean
+HPDinterval(m.mean.h2$Sol) # credible intervals
+
+posterior.mode(m.mean.h2$VCV) # raw variance
+HPDinterval(m.mean.h2$VCV) # credible intervals
+
+## Species sample sizes
+
+# Number of birds and mammals
+n.tax<- h2_data %>% 
+  count(animal,taxonomic.class)
+
+nrow(n.tax[n.tax$taxonomic.class=="bird",])
+nrow(n.tax[n.tax$taxonomic.class=="mammal",])
+
+species.n <- h2_data %>% 
+  count(species.english) %>% 
+  arrange(n)
+
+species.n %>% top_n(5) #Most species estimates
+species.n %>% top_n(-1) #Fewest species estimates
+
+top5 <- species.n %>% top_n(5)
+sum(top5$n)/sum(species.n$n) #top five accounting for 42%
+
+``` 
