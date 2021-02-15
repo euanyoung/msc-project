@@ -23,7 +23,9 @@ library(geiger)
 
 library(MCMCglmm) #for models
 
-library(ggplot) #for figures
+library(ggplot2) #for figures
+library(ggpubr)
+library(ggtree)
 
 ```
 
@@ -138,7 +140,7 @@ prior3 <- list(R = list(V = diag(1), nu = 0.002),
 
 SE.mev <- (cva_data$SE.CVA)^2
 
-m1.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = cva_tree, mev=SE.mev, data=cva_data, pr=TRUE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
+m1.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = cva_tree, mev=SE.mev, data=cva_data, pr=TRUE, verbose = FALSE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
 
 h2_data <- h2_data %>%
   select(-trait)
@@ -154,7 +156,7 @@ prior3 <- list(R = list(V = diag(1), nu = 0.002),
 
 SE.mev <- (h2_data$SE.h2)^2
 
-m1.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = bird_mammal_tree, mev=SE.mev, data=h2_data, pr=TRUE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
+m1.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = bird_mammal_tree, mev=SE.mev, data=h2_data, pr=TRUE, verbose = FALSE, prior=prior3, nitt=1005000, thin=1000, burnin=5000)
 
 
 # prior
@@ -165,14 +167,30 @@ prior2 <- list(R = list(V = diag(1), nu = 0.002),
 
 SE.mev <- (cva_data$SE.CVA)^2
 
-m2.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=cva_data, pr=TRUE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
+m2.cva <- MCMCglmm(CVA~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=cva_data, pr=TRUE, verbose = FALSE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
 
 
 h2_data<- as.data.frame(h2_data)
 
 SE.mev <- (h2_data$SE.h2)^2
 
-m2.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=h2_data, pr=TRUE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
+m2.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~species.english+study.ID, mev=SE.mev, data=h2_data, pr=TRUE, verbose = FALSE, prior=prior2, nitt=1005000, thin=1000, burnin=5000)
+
+
+# Reduced dataset model
+
+SE.mev <- (cva_data$SE.h2)^2
+
+m3.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~animal+species.english+study.ID, pedigree = cva_tree, mev=SE.mev, data=cva_data, pr=TRUE, verbose = FALSE, prior=prior3, nitt=1505000, thin=1500, burnin=5000)
+summary(m3.h2)
+plot(m3.h2$VCV)
+
+SE.mev <- (cva_data$SE.h2)^2
+
+m4.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~species.english+study.ID,mev=SE.mev, data=cva_data, pr=TRUE, verbose = FALSE, prior=prior2, nitt=1505000, thin=1500, burnin=5000)
+summary(m4.h2)
+plot(m4.h2$VCV)
+
 
 
 ```
@@ -182,7 +200,6 @@ m2.h2 <- MCMCglmm(h2~method.2+trait.category.fitness+n+year, random=~species.eng
 Here, I am using some functions to extract the results I am interested in from the MCMCglmm models
 
 ```{r results}
-summary(m1.cva)
 # This function is used to calculate the percentage variation explained by each random effect - MCMCglmmm only gives you the raw variation estimates
 ran.perc <- function(x) { #x is the MCMCglmm model
   smpl <- x$VCV #extract the ~1000 estimates
@@ -222,6 +239,8 @@ HPDinterval(m1.cva$VCV)
 ran.perc(m1.h2)
 ftable(m1.h2)
 
+ran.perc(m3.h2)
+
 posterior.mode(m1.h2$VCV)
 HPDinterval(m1.h2$VCV)
 
@@ -248,11 +267,13 @@ ftable(m2.cva)
 
 ran.perc.2(m2.h2)
 ftable(m1.h2)
+
+
 ```
 
 ## Creating figures
 
-Here is the code for creating the figures. Generally it involves extracting the fixed effect and random effect estimates from the MCMCglmm models
+Here is the code for creating the figures. Generally speaking it involves extracting the fixed effect and random effect estimates from the MCMCglmm models
 
 #### Figure 1a and b
 
@@ -663,6 +684,46 @@ ggplot(pmBV, aes(x=reorder(species.english, mode.BV), color="navy"),y=mode.BV) +
   guides(color = guide_legend(label.position = "right", title = "",label.theme = element_text(angle = 90), size =1)) +
   ylab(bquote(''*h^2*''))
 
+spe.bvs<- ggplot(pmBV, aes(x=reorder(species.english, bird_mammal_tree$tip.label), color="navy"),y=mode.BV) + 
+  geom_pointrange(aes(y=mode.BV,ymin=lower.CI, ymax=upper.CI)) +
+  geom_hline(yintercept=0) +
+  xlab("") +
+  ylab("heritability estimate") +
+  ggtitle("") +
+  ylim(c(.0,.9)) + 
+  theme(plot.title = element_text(hjust=0.5)) +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"), 
+        axis.line.x.bottom = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.text = element_text(colour = "black", size = 11, angle = 0, family = "serif")) +
+  theme(axis.title.x =  element_text(colour = "black", size = 11, face="plain")) +
+  theme(title =  element_text(colour = "black", size = 10, face="plain")) +
+  theme(axis.title.y = element_text(colour = "black", size = 11, face="plain", lineheight = 0.5))+ 
+  theme(axis.text.x = element_blank())+
+  scale_color_manual(values = c("black")) +
+  geom_text(aes(label=n), y= .8,color="black", size=4, angle = 90, family = "serif") +
+  ylab(bquote(''*h^2*''))
+
+
+library(ggtree)
+tree <- ggtree(bird_mammal_tree)
+
+fig3 <- ggarrange(spe.bvs,tree+rotate(), 
+                  labels = c("", ""),
+                  ncol = 1, nrow = 2,align = "v", common.legend = TRUE, legend = "none")
+
+annotate_figure(fig3,
+                left = text_grob("Probability density", color = "black", rot = 90, size = 16,vjust=1),
+                bottom = text_grob("Percentage variance explained by effect", color = "black", size = 16,vjust=-1)
+)
+
+bird_mammal_tree$tip.label
+
+
 ```
 
 ## Descriptive stats
@@ -690,7 +751,7 @@ cva_data <- cva_data %>%
 
 SE.mev <- (cva_data$SE.CVA)^2
 
-m.mean.cva <- MCMCglmm(CVA~1, mev=SE.mev, data=cva_data,prior=prior1, nitt=1005000, thin=1000, burnin=5000)
+m.mean.cva <- MCMCglmm(CVA~1, mev=SE.mev, data=cva_data,verbose = FALSE, prior=prior1, nitt=1005000, thin=1000, burnin=5000)
 
 posterior.mode(m.mean.cva$Sol) # mean
 HPDinterval(m.mean.cva$Sol) # credible intervals
@@ -732,7 +793,7 @@ prior1 <- list(R = list(V = diag(1), nu = 0.002))
 
 SE.mev <- (h2_data$SE.h2)^2
 
-m.mean.h2 <- MCMCglmm(h2~1, mev=SE.mev, data=h2_data,prior=prior1, nitt=1005000, thin=1000, burnin=5000)
+m.mean.h2 <- MCMCglmm(h2~1, mev=SE.mev, data=h2_data,verbose = FALSE, prior=prior1, nitt=1005000, thin=1000, burnin=5000)
 
 posterior.mode(m.mean.h2$Sol) # mean
 HPDinterval(m.mean.h2$Sol) # credible intervals
